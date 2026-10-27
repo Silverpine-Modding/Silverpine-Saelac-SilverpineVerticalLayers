@@ -81,6 +81,10 @@ internal static class PrefabFactory
         instance.GetComponent<ProjectedUpperFloor>().Configure(
             sourceLevel,
             canonical);
+        // Make the new floor visible to tile-local queries immediately. Waiting
+        // for Start allowed the stair landing/rebuild to spawn a duplicate in
+        // the same frame. TurfRegistrar.Start skips already registered objects.
+        instance.GetComponent<TurfRegistrar>()?.Register();
         return instance;
     }
 

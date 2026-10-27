@@ -33,11 +33,13 @@ internal static class StructureHandlerCompatibility
 
         string version = AccessTools.Field(PluginType, "PluginVersion")
             ?.GetRawConstantValue()?.ToString() ?? "unknown";
-        if (!string.Equals(version, SupportedVersion, StringComparison.Ordinal))
+        int editorApi = AccessTools.Field(PluginType, "EditorApiVersion")
+            ?.GetRawConstantValue() is int api ? api : 0;
+        if (!string.Equals(version, SupportedVersion, StringComparison.Ordinal) && editorApi != 2)
         {
             Plugin.Log.LogWarning(
                 $"Structure Handler {version} was detected, but Vertical Layers targets " +
-                $"{SupportedVersion}; optional integration is disabled.");
+                $"{SupportedVersion} or editor API 2; optional integration is disabled.");
             return;
         }
 
@@ -60,7 +62,7 @@ internal static class StructureHandlerCompatibility
 
         Available = true;
         Plugin.Log.LogInfo(
-            "Enabled floor-aware Structure Handler 1.1.10 integration.");
+            $"Enabled floor-aware Structure Handler {version} integration.");
     }
 
     internal static MethodBase RequireMethod(Type? type, string name) =>
@@ -299,6 +301,9 @@ internal static class StructureEditorFloorView
 
     private static ViewState? active;
     private static bool viewDisabledAfterError;
+    private static object? lastViewedStructure;
+    private static int lastViewedRevision = -1;
+    private static int lastViewedFloor = int.MinValue;
 
     internal static void BeginSafely(object editor, string caller)
     {
@@ -377,8 +382,16 @@ internal static class StructureEditorFloorView
             PopulateView(terrain, state.ViewTerrain, state.TerrainStates, selected);
             objectsField.SetValue(structure, state.ViewObjects);
             terrainField.SetValue(structure, state.ViewTerrain);
-            SetEditorField(editor, "renderOrderDirty", true);
-            SetEditorField(editor, "renderOrderStructure", null);
+            int revision = AccessTools.Field(editor.GetType(), "editRevision")?.GetValue(editor) is int value
+                ? value : -1;
+            if (revision < 0 || !ReferenceEquals(lastViewedStructure, structure) ||
+                lastViewedRevision != revision || lastViewedFloor != selected)
+            {
+                AccessTools.Method(editor.GetType(), "InvalidateRenderOrder")?.Invoke(editor, null);
+                lastViewedStructure = structure;
+                lastViewedRevision = revision;
+                lastViewedFloor = selected;
+            }
             active = state;
         }
         catch
@@ -514,11 +527,11 @@ internal static class StructureEditorFloorView
         IList view,
         IDictionary<object, RecordState> states)
     {
-        foreach (object record in states.Keys.ToArray())
-        {
-            if (!view.Contains(record))
-                original.Remove(record);
-        }
+        var visible = new HashSet<object>(view.Cast<object>());
+        var deleted = new HashSet<object>(states.Keys.Where(record => !visible.Contains(record)));
+        for (int index = original.Count - 1; index >= 0; index--)
+            if (deleted.Contains(original[index]!)) original.RemoveAt(index);
+        var existing = new HashSet<object>(original.Cast<object>());
 
         foreach (object record in view)
         {
@@ -528,7 +541,7 @@ internal static class StructureEditorFloorView
                     ? Plugin.StructureEditorFloor.Value
                     : 0;
             SetRecordX(record, ToPhysicalX(GetRecordX(record), level));
-            if (!original.Contains(record))
+            if (existing.Add(record))
                 original.Add(record);
         }
     }
@@ -634,7 +647,11 @@ internal static class StructureEditorMutationPatch
                      "Load",
                      "CreateBlankStructure",
                      "CombineCheckedFiles",
-                     "Close"
+                     "Close",
+                     "CaptureEditorSnapshot",
+                     "Undo",
+                     "Redo",
+                     "RestoreEditorSnapshot"
                  })
         {
             MethodInfo? method = AccessTools.Method(type, name);

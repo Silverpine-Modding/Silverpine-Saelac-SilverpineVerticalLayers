@@ -15,6 +15,8 @@ public sealed class VerticalLayerManager : MonoBehaviour,
     private readonly FloorNetwork floorNetwork = new();
     private readonly HashSet<(int SourceLevel, Vector2Int Canonical)>
         dirtyProjectionCells = new();
+    private readonly List<(int SourceLevel, Vector2Int Canonical)>
+        projectionWork = new();
     private int activeLevelMask = 1;
     private bool transitionInProgress;
     private bool suppressPairRemoval;
@@ -92,6 +94,8 @@ public sealed class VerticalLayerManager : MonoBehaviour,
     internal void ActivateLevel(int level)
     {
         if (level <= 0 || level >= Plugin.MaxLevels.Value)
+            return;
+        if (IsLevelActive(level))
             return;
         activeLevelMask |= 1 << level;
         RebuildProjection(level - 1);
@@ -406,9 +410,19 @@ public sealed class VerticalLayerManager : MonoBehaviour,
         Vector2Int destinationPhysical =
             LayerCoordinates.ToPhysical(canonical, destinationLevel);
         bool roofed = TileTags.HasTileTag(sourcePhysical, TileTag.Roofed);
-        ProjectedUpperFloor? projected = Turfs
-            .GetTurfComponents<ProjectedUpperFloor>(destinationPhysical)
-            .FirstOrDefault(component => component.SourceLevel == sourceLevel);
+        ProjectedUpperFloor? projected = null;
+        if (Turfs.TryGetTurfGameObjects(destinationPhysical, out var objects))
+            foreach (GameObject gameObject in objects)
+            {
+                if (gameObject == null)
+                    continue;
+                ProjectedUpperFloor? candidate = gameObject.GetComponent<ProjectedUpperFloor>();
+                if (candidate != null && candidate.SourceLevel == sourceLevel)
+                {
+                    projected = candidate;
+                    break;
+                }
+            }
 
         if (roofed && projected == null &&
             !floorNetwork.HasFloor(destinationLevel, canonical))
@@ -445,11 +459,14 @@ public sealed class VerticalLayerManager : MonoBehaviour,
     {
         if (dirtyProjectionCells.Count == 0)
             return;
-        (int SourceLevel, Vector2Int Canonical)[] cells =
-            dirtyProjectionCells.ToArray();
+        // Reconciliation can queue more cells through registration callbacks.
+        // Snapshot into a reusable buffer, leaving those new notifications queued.
+        projectionWork.Clear();
+        projectionWork.AddRange(dirtyProjectionCells);
         dirtyProjectionCells.Clear();
-        foreach ((int sourceLevel, Vector2Int canonical) in cells)
+        foreach ((int sourceLevel, Vector2Int canonical) in projectionWork)
             ReconcileProjection(sourceLevel, canonical);
+        projectionWork.Clear();
         Renderer.MarkFloorMaskDirty();
     }
 

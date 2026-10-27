@@ -17,6 +17,10 @@ internal sealed class FloorNetwork
     }
 
     private readonly Dictionary<int, Snapshot> cache = new();
+    private static readonly Vector2Int[] Directions =
+    {
+        Vector2Int.up, Vector2Int.right, Vector2Int.down, Vector2Int.left
+    };
 
     internal void Invalidate(int level = -1)
     {
@@ -27,7 +31,8 @@ internal sealed class FloorNetwork
     }
 
     internal bool HasFloor(int level, Vector2Int canonical) =>
-        Get(level).Floors.Contains(canonical);
+        LayerCoordinates.IsCanonicalSilverpine(canonical) &&
+        UpperFloorOccupancy.HasActualFloor(LayerCoordinates.ToPhysical(canonical, level));
 
     internal IEnumerable<Vector2Int> GetFloors(int level) =>
         Get(level).Floors;
@@ -62,8 +67,9 @@ internal sealed class FloorNetwork
         }
 
         int best = int.MaxValue;
-        foreach (Vector2Int neighbor in Neighbors(canonical))
+        foreach (Vector2Int direction in Directions)
         {
+            Vector2Int neighbor = canonical + direction;
             if (snapshot.Distances.TryGetValue(neighbor, out int distance))
                 best = Math.Min(best, distance + 1);
         }
@@ -210,16 +216,30 @@ internal sealed class FloorNetwork
             return false;
         if (gameObject.GetComponent<ProjectedUpperFloor>() != null)
             return true;
-        string name = SerializationManager.GetPrefabName(gameObject);
-        return name.StartsWith("prefab_tile_", StringComparison.OrdinalIgnoreCase) &&
-               !name.Contains("water", StringComparison.OrdinalIgnoreCase) &&
-               !name.Contains("teleporter", StringComparison.OrdinalIgnoreCase) &&
+        return IsFloorPrefabName(gameObject.name) &&
                gameObject.GetComponent<Door>() == null;
+    }
+
+    internal static bool IsFloorPrefabName(string objectName)
+    {
+        // Match GetPrefabName's first space/'(' delimiter without Split's arrays
+        // and substrings on every movement/pathfinding occupancy check.
+        if (!objectName.StartsWith("prefab_tile_", StringComparison.OrdinalIgnoreCase))
+            return false;
+        int end = objectName.Length;
+        int space = objectName.IndexOf(' ');
+        int parenthesis = objectName.IndexOf('(');
+        if (space >= 0)
+            end = space;
+        if (parenthesis >= 0)
+            end = Math.Min(end, parenthesis);
+        return objectName.IndexOf("water", 0, end, StringComparison.OrdinalIgnoreCase) < 0 &&
+               objectName.IndexOf("teleporter", 0, end, StringComparison.OrdinalIgnoreCase) < 0;
     }
 
     private Snapshot Get(int level)
     {
-        if (!cache.TryGetValue(level, out Snapshot snapshot))
+        if (!cache.TryGetValue(level, out Snapshot? snapshot))
         {
             snapshot = BuildSnapshot(level, null, null);
             cache[level] = snapshot;
@@ -233,6 +253,7 @@ internal sealed class FloorNetwork
         string? excludedSupportPair)
     {
         Snapshot snapshot = new();
+        List<VerticalSupport> supports = new();
         for (int x = LayerCoordinates.CanonicalMin;
              x <= LayerCoordinates.CanonicalMax;
              x++)
@@ -245,17 +266,35 @@ internal sealed class FloorNetwork
                 if (excludedFloor.HasValue && excludedFloor.Value == canonical)
                     continue;
                 Vector2Int physical = LayerCoordinates.ToPhysical(canonical, level);
-                List<GameObject> objects = Turfs.GetTurfGameObjects(physical);
-                if (!objects.Any(IsFloorObject))
+                if (!Turfs.TryGetTurfGameObjects(physical, out List<GameObject> objects))
+                    continue;
+                bool hasFloor = false;
+                bool anchored = false;
+                foreach (GameObject gameObject in objects)
+                {
+                    if (gameObject == null)
+                        continue;
+                    if (!hasFloor && IsFloorObject(gameObject))
+                        hasFloor = true;
+                    if (anchored)
+                        continue;
+                    if (gameObject.GetComponent<ProjectedUpperFloor>() != null)
+                    {
+                        anchored = true;
+                        continue;
+                    }
+                    gameObject.GetComponents(supports);
+                    foreach (VerticalSupport support in supports)
+                        if (support.IsAnchor && support.PairId != excludedSupportPair)
+                        {
+                            anchored = true;
+                            break;
+                        }
+                }
+                if (!hasFloor)
                     continue;
                 snapshot.Floors.Add(canonical);
-                bool projected = objects.Any(gameObject =>
-                    gameObject.GetComponent<ProjectedUpperFloor>() != null);
-                bool supported = objects
-                    .SelectMany(gameObject => gameObject.GetComponents<VerticalSupport>())
-                    .Any(component =>
-                        component.IsAnchor && component.PairId != excludedSupportPair);
-                if (projected || supported)
+                if (anchored)
                     snapshot.Anchors.Add(canonical);
             }
         }
@@ -270,8 +309,9 @@ internal sealed class FloorNetwork
         {
             Vector2Int current = queue.Dequeue();
             int nextDistance = snapshot.Distances[current] + 1;
-            foreach (Vector2Int neighbor in Neighbors(current))
+            foreach (Vector2Int direction in Directions)
             {
+                Vector2Int neighbor = current + direction;
                 if (!snapshot.Floors.Contains(neighbor) ||
                     snapshot.Distances.TryGetValue(neighbor, out int existing) &&
                     existing <= nextDistance)
@@ -313,13 +353,5 @@ internal sealed class FloorNetwork
         }
         reason = "";
         return true;
-    }
-
-    private static IEnumerable<Vector2Int> Neighbors(Vector2Int position)
-    {
-        yield return position + Vector2Int.up;
-        yield return position + Vector2Int.right;
-        yield return position + Vector2Int.down;
-        yield return position + Vector2Int.left;
     }
 }

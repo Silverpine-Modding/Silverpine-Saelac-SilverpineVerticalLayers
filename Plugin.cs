@@ -23,7 +23,7 @@ public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "renegadex.silverpine.verticallayers";
     public const string PluginName = "Silverpine Vertical Layers";
-    public const string PluginVersion = "0.4.6";
+    public const string PluginVersion = "0.4.8";
 
     internal static ManualLogSource Log = null!;
     internal static Plugin Instance = null!;

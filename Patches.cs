@@ -9,21 +9,6 @@ using UnityEngine;
 
 namespace SilverpineVerticalLayers;
 
-internal static class UpperFloorOccupancy
-{
-    internal static bool HasActualFloor(Vector2Int physical) =>
-        Turfs.GetTurfGameObjects(physical).Any(FloorNetwork.IsFloorObject);
-
-    internal static bool CanOccupy(Vector2Int physical, bool flying)
-    {
-        if (flying ||
-            !LayerCoordinates.TryDecode(
-                physical, out int level, out _))
-            return true;
-        return level <= 0 || HasActualFloor(physical);
-    }
-}
-
 internal static class UpperFloorShelter
 {
     private static readonly Dictionary<int, HashSet<Vector2Int>> Cache = new();

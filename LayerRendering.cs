@@ -2,14 +2,24 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using HarmonyLib;
 using UnityEngine;
+using UnityEngine.Profiling;
 
 namespace SilverpineVerticalLayers;
 
 public sealed class LowerLayerRenderer : MonoBehaviour
 {
     private readonly List<Camera> captureCameras = new();
+    private readonly List<Plane[]> captureFrusta = new();
+    private readonly List<(CullInvisible cull, SpriteRenderer renderer)> visibilityCandidates = new();
+    private readonly List<SpriteRenderer> temporarilyEnabled = new();
+    private Vector3 candidateCameraPosition;
+    private Quaternion candidateCameraRotation;
+    private Matrix4x4 candidateProjection;
+    private int candidateRegistryRevision = -1;
+    private int candidateLevel = -1;
+    private float nextCandidateRefreshTime;
     private RenderTexture? composite;
     private Camera? displayCamera;
     private GameObject? displayQuad;
@@ -66,7 +76,6 @@ public sealed class LowerLayerRenderer : MonoBehaviour
             dirty = false;
             nextCaptureTime = now + 1f / Plugin.MovementBurstFps.Value;
         }
-        UpdateDisplayRegistration(level);
         lastLevel = level;
     }
 
@@ -157,18 +166,21 @@ public sealed class LowerLayerRenderer : MonoBehaviour
             Camera camera = cameraObject.AddComponent<Camera>();
             camera.enabled = false;
             captureCameras.Add(camera);
+            captureFrusta.Add(new Plane[6]);
         }
         while (captureCameras.Count > lowerLayerCount)
         {
             Camera camera = captureCameras[^1];
             captureCameras.RemoveAt(captureCameras.Count - 1);
+            captureFrusta.RemoveAt(captureFrusta.Count - 1);
             Destroy(camera.gameObject);
         }
 
         EnsureDisplay();
-        if (displayMaterial != null)
+        if (displayMaterial != null && displayMaterial.mainTexture != composite)
             displayMaterial.mainTexture = composite;
-        mainCamera.clearFlags = CameraClearFlags.Depth;
+        if (mainCamera.clearFlags != CameraClearFlags.Depth)
+            mainCamera.clearFlags = CameraClearFlags.Depth;
     }
 
     private void EnsureDisplay()
@@ -211,10 +223,12 @@ public sealed class LowerLayerRenderer : MonoBehaviour
 
         if (displayCamera != null && displayQuad != null)
         {
-            displayCamera.depth = mainCamera.depth - 10f;
+            if (displayCamera.depth != mainCamera.depth - 10f)
+                displayCamera.depth = mainCamera.depth - 10f;
             float aspect = Mathf.Max(0.01f, mainCamera.aspect);
-            displayQuad.transform.localScale = new Vector3(2f * aspect, 2f, 1f);
-            displayCamera.gameObject.SetActive(true);
+            Vector3 scale = new(2f * aspect, 2f, 1f);
+            if (displayQuad.transform.localScale != scale)
+                displayQuad.transform.localScale = scale;
         }
     }
 
@@ -223,15 +237,20 @@ public sealed class LowerLayerRenderer : MonoBehaviour
         if (mainCamera == null || composite == null)
             return;
 
-        RenderTexture previous = RenderTexture.active;
-        RenderTexture.active = composite;
-        GL.Clear(true, true, Plugin.VoidColor.Value);
-        RenderTexture.active = previous;
-
-        List<(SpriteRenderer renderer, bool enabled)> visibility =
-            PrepareLowerVisibility(currentLevel);
+        Profiler.BeginSample("SVL.RenderLowerLayers");
         try
         {
+            RenderTexture previous = RenderTexture.active;
+            try
+            {
+                RenderTexture.active = composite;
+                GL.Clear(true, true, Plugin.VoidColor.Value);
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+            }
+
             Vector2 canonicalCamera = GetCanonicalCameraPosition(currentLevel);
             for (int level = 0; level < currentLevel; level++)
             {
@@ -246,8 +265,12 @@ public sealed class LowerLayerRenderer : MonoBehaviour
                     canonicalCamera.x + layerOffset.x,
                     canonicalCamera.y,
                     mainCamera.transform.position.z);
-                capture.Render();
+                GeometryUtility.CalculateFrustumPlanes(capture, captureFrusta[level]);
             }
+
+            PrepareLowerVisibility(currentLevel);
+            for (int level = 0; level < currentLevel; level++)
+                captureCameras[level].Render();
         }
         catch (Exception exception)
         {
@@ -255,42 +278,89 @@ public sealed class LowerLayerRenderer : MonoBehaviour
         }
         finally
         {
-            foreach ((SpriteRenderer renderer, bool enabled) in visibility)
+            // Only disabled sprites are changed. This also deduplicates renderers
+            // shared by multiple CullInvisible components without a dictionary.
+            foreach (SpriteRenderer renderer in temporarilyEnabled)
                 if (renderer != null)
-                    renderer.enabled = enabled;
+                    renderer.enabled = false;
+            temporarilyEnabled.Clear();
+            Profiler.EndSample();
         }
     }
 
-    private static List<(SpriteRenderer, bool)> PrepareLowerVisibility(
-        int currentLevel)
+    private void PrepareLowerVisibility(int currentLevel)
     {
-        Dictionary<SpriteRenderer, bool> states = new();
-        foreach (CullInvisible cull in Resources.FindObjectsOfTypeAll<CullInvisible>())
+        Profiler.BeginSample("SVL.PrepareLowerVisibility");
+        try
         {
-            if (cull == null || !cull.gameObject.scene.IsValid() ||
-                !cull.gameObject.activeInHierarchy)
-                continue;
-            int level = LayerCoordinates.GetLevel(cull.transform.GetVector2IntPosition());
-            if (level >= currentLevel)
-                continue;
-            SpriteRenderer? renderer = cull.GetComponent<SpriteRenderer>() ??
-                                       cull.GetComponentInChildren<SpriteRenderer>();
-            if (renderer == null)
-                continue;
-            SetTemporaryVisibility(states, renderer, true);
+            RefreshVisibilityCandidates(currentLevel);
+            foreach ((CullInvisible cull, SpriteRenderer renderer) in visibilityCandidates)
+            {
+                if (cull == null || renderer == null || renderer.enabled ||
+                    !renderer.gameObject.activeInHierarchy)
+                    continue;
+                int level = LayerCoordinates.GetLevel(cull.transform.GetVector2IntPosition());
+                if (level >= currentLevel ||
+                    !GeometryUtility.TestPlanesAABB(captureFrusta[level], renderer.bounds))
+                    continue;
+                temporarilyEnabled.Add(renderer);
+                renderer.enabled = true;
+            }
         }
-
-        return states.Select(pair => (pair.Key, pair.Value)).ToList();
+        finally
+        {
+            Profiler.EndSample();
+        }
     }
 
-    private static void SetTemporaryVisibility(
-        IDictionary<SpriteRenderer, bool> states,
-        SpriteRenderer renderer,
-        bool enabled)
+    private void RefreshVisibilityCandidates(int currentLevel)
     {
-        if (!states.ContainsKey(renderer))
-            states.Add(renderer, renderer.enabled);
-        renderer.enabled = enabled;
+        if (mainCamera == null)
+            return;
+        Vector3 position = mainCamera.transform.position;
+        Quaternion rotation = mainCamera.transform.rotation;
+        Matrix4x4 projection = mainCamera.projectionMatrix;
+        if (!dirty && candidateLevel == currentLevel &&
+            candidateRegistryRevision == LowerLayerCullRegistry.Revision &&
+            (position - candidateCameraPosition).sqrMagnitude <= 1f &&
+            rotation == candidateCameraRotation && projection == candidateProjection &&
+            Time.unscaledTime < nextCandidateRefreshTime)
+            return;
+
+        Profiler.BeginSample("SVL.RefreshVisibilityCandidates");
+        try
+        {
+            visibilityCandidates.Clear();
+            // CullInvisible already maintains this set across spawns and save loads.
+            // Do not search every loaded Unity object on each animation frame.
+            foreach (CullInvisible cull in LowerLayerCullRegistry.All)
+            {
+                if (cull == null || !cull.gameObject.scene.IsValid())
+                    continue;
+                int level = LayerCoordinates.GetLevel(cull.transform.GetVector2IntPosition());
+                if (level >= currentLevel)
+                    continue;
+                SpriteRenderer renderer = LowerLayerCullRegistry.SpriteRenderer(cull);
+                if (renderer == null)
+                    continue;
+                Bounds bounds = renderer.bounds;
+                // Two tiles of padding allow reuse through a one-tile camera/NPC
+                // movement. Exact frustum checks still happen on every capture.
+                bounds.Expand(4f);
+                if (GeometryUtility.TestPlanesAABB(captureFrusta[level], bounds))
+                    visibilityCandidates.Add((cull, renderer));
+            }
+            candidateCameraPosition = position;
+            candidateCameraRotation = rotation;
+            candidateProjection = projection;
+            candidateLevel = currentLevel;
+            candidateRegistryRevision = LowerLayerCullRegistry.Revision;
+            nextCandidateRefreshTime = Time.unscaledTime + 0.25f;
+        }
+        finally
+        {
+            Profiler.EndSample();
+        }
     }
 
     private Vector2 GetCanonicalCameraPosition(int level)
@@ -302,14 +372,6 @@ public sealed class LowerLayerRenderer : MonoBehaviour
         return new Vector2(
             mainCamera.transform.position.x - offset.x,
             mainCamera.transform.position.y);
-    }
-
-    private void UpdateDisplayRegistration(int currentLevel)
-    {
-        if (displayMaterial == null)
-            return;
-        displayMaterial.mainTextureScale = Vector2.one;
-        displayMaterial.mainTextureOffset = Vector2.zero;
     }
 
     private bool HasViewChanged()
@@ -343,6 +405,9 @@ public sealed class LowerLayerRenderer : MonoBehaviour
             if (camera != null)
                 Destroy(camera.gameObject);
         captureCameras.Clear();
+        captureFrusta.Clear();
+        visibilityCandidates.Clear();
+        candidateLevel = -1;
         if (displayCamera != null)
             Destroy(displayCamera.gameObject);
         displayCamera = null;
@@ -394,4 +459,30 @@ public sealed class LowerLayerRenderer : MonoBehaviour
 
     private static int RoundToEight(int value) =>
         Mathf.Max(8, ((value + 4) / 8) * 8);
+}
+
+// These fields are the game's own initialized registry and cached extended
+// sprite renderer (which can be on a child), not a second scene-wide cache.
+[HarmonyPatch]
+internal static class LowerLayerCullRegistry
+{
+    internal static readonly HashSet<CullInvisible> All =
+        (HashSet<CullInvisible>)AccessTools.Field(typeof(CullInvisible), "all")
+            .GetValue(null);
+    internal static readonly AccessTools.FieldRef<CullInvisible, SpriteRenderer>
+        SpriteRenderer = AccessTools.FieldRefAccess<CullInvisible, SpriteRenderer>(
+            "spriteRenderer");
+    internal static int Revision { get; private set; }
+
+    private static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+    {
+        yield return AccessTools.Method(typeof(CullInvisible), "Awake");
+        yield return AccessTools.Method(typeof(CullInvisible), "OnDestroy");
+    }
+
+    private static void Postfix()
+    {
+        Revision++;
+        VerticalLayerManager.Instance?.Renderer.MarkDirty();
+    }
 }

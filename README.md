@@ -65,6 +65,28 @@ movement animation. Once movement settles it returns to the low configurable
 idle refresh rate. Lower walls, terrain, NPCs, furniture, and other live
 objects are all included without floor masks or wall-specific suppression.
 
+Version 0.4.7 reduces CPU work and temporary allocations without lowering the
+movement refresh rate or the default render resolution:
+
+- Visibility uses the game's existing `CullInvisible` registry and cached
+  sprite references instead of a Unity-wide object search each moving frame.
+- A padded viewport candidate list is reused during movement. It refreshes on
+  world changes, floor changes, camera movement beyond its margin, zoom changes,
+  and at least every 0.25 seconds while capturing. Actual visibility is checked
+  against each capture camera's frustum on every rendered frame.
+- Only hidden sprites intersecting the lower view are temporarily enabled;
+  their original hidden state is restored even if a capture fails.
+- Floor-presence queries inspect one turf rather than building the entire
+  support network. Full support snapshots avoid empty-tile lists and per-cell
+  LINQ/component-array allocations. The four-tile support rule is unchanged.
+- Already active levels skip redundant full-town activation rebuilds. Newly
+  generated floors register immediately so the stair landing cannot duplicate
+  a floor generated earlier in the same frame.
+
+These changes reduce known CPU/garbage-collection costs; an actual FPS gain must
+be measured in-game. Live mode still performs one camera render per lower floor
+during movement, so its GPU cost remains dependent on resolution and scene size.
+
 Set the view to `Void` to use a plain background like an older tile-based game.
 Void mode releases the lower cameras, material, and render texture rather than
 leaving hidden render resources allocated.
@@ -198,6 +220,26 @@ dotnet build SilverpineVerticalLayers.csproj -c Release
 ```
 
 The release output is `bin/Release/SilverpineVerticalLayers.dll`.
+
+### Regression checks
+
+With the .NET 9 SDK installed:
+
+```powershell
+dotnet run --project Tests/PerformanceRegressionTests.csproj -c Release
+```
+
+The dependency-free test harness links the production floor-network, occupancy,
+and coordinate code against a small in-memory world. It checks prefab-name
+classification, walkability, support distances/removal, cache invalidation,
+third-floor coordinates, tile-probe counts, and empty-air allocations. It does
+not simulate Unity rendering or object lifecycle callbacks.
+
+Before enabling a new build, check in-game: walk continuously on the 2nd and
+3rd floors, zoom while walking, watch NPCs enter/leave the lower viewport, switch
+Live/Void, load a save, and build/rebuild stairs. Confirm movement stays synced,
+lower sprites return to normal when descending, and no duplicate landing floor
+or new rendering/registration errors appear in the BepInEx log.
 
 ## Credits
 
