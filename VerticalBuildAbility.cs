@@ -1,52 +1,68 @@
 #nullable enable
 
 using HarmonyLib;
+using Silverpine.ModdingTools;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
 using UnityEngine;
 
 namespace SilverpineVerticalLayers;
 
 /// <summary>
-/// Adds the two genuinely vertical structures to the game's existing Construct
-/// radial. Ordinary wood/rock floors remain the base game's own entries, whose
+/// Registers vertical structures with Modding Tools' shared Construct menu.
+/// Ordinary wood/rock floors remain the base game's own entries, whose
 /// placement predicates are extended by UpperFloorPlacementPatch.
 /// </summary>
 internal static class VerticalConstructionEntries
 {
     private const int SiteSetupTurns = 10;
     private const int SiteWorkTurns = 60;
-    private static bool loggedInjection;
+    internal const string CategoryId = Plugin.PluginGuid + ".construction";
+    internal const string StairsId = Plugin.PluginGuid + ".stairs";
+    internal const string SupportId = Plugin.PluginGuid + ".support";
 
-    internal static void AppendTo(List<ListUIItem_Generic> entries)
+    internal static void Register()
     {
-        if (entries.Any(item => item.name == "FLOOR TRANSITION STAIRS"))
-            return;
+        ConstructionMenu.RegisterCategory(Plugin.PluginGuid,
+            new ConstructionCategoryDefinition
+            {
+                Id = CategoryId,
+                Label = "Vertical Layers",
+                Order = 120
+            });
+        RegisterEntry(StairsId, "Floor Transition Stairs", PrefabFactory.StairsPrefabName,
+            -200, StairsCost(), StartStairsPlacement);
+        RegisterEntry(SupportId, "Structural Support", PrefabFactory.SupportPrefabName,
+            -199, SupportCost(), StartSupportPlacement);
+    }
 
-        // RadialMenuUI shows only seven content entries before placing the
-        // remainder behind its "..." item. Keep both vertical entries on the
-        // first page instead of appending them after the thirteen base items.
-        entries.Insert(0, new ListUIItem_Generic(
-            "STRUCTURAL SUPPORT",
-            PrefabPreviewGenerator.GeneratePreview(
-                SerializationManager.GetPrefabFromName(
-                    PrefabFactory.SupportPrefabName)),
-            "Rock x 4\nExtends the supported floor span",
-            StartSupportPlacement));
-        entries.Insert(0, new ListUIItem_Generic(
-            "FLOOR TRANSITION STAIRS",
-            PrefabFactory.StairSprites[0],
-            "Plank x 8, Nails x 4\nConstruct and supply like a normal building site",
-            StartStairsPlacement));
-
-        if (!loggedInjection)
+    private static void RegisterEntry(
+        string id,
+        string label,
+        string prefabName,
+        int order,
+        List<ItemNameAmountPair> cost,
+        Action startPlacement)
+    {
+        var definition = new ConstructionDefinition
         {
-            loggedInjection = true;
-            Plugin.Log.LogInfo(
-                "Inserted stairs and structural support into the first Construct radial page.");
-        }
+            Id = id,
+            Label = label,
+            PrefabName = prefabName,
+            Category = CategoryId,
+            Order = order,
+            Mode = ConstructionMode.ConstructionSite,
+            WorkMinutes = (SiteSetupTurns + SiteWorkTurns) / 2,
+            PlayerPropertyOnly = false,
+            RequiresHammer = true,
+            // The framework closes its window/releases input before invoking
+            // this. Keep our paired-floor site creation and Salt Free Build path.
+            StartPlacement = startPlacement
+        };
+        foreach (ItemNameAmountPair material in cost)
+            definition.Materials.Add(new ConstructionMaterial(material.itemName, material.amount));
+        ConstructionMenu.Register(Plugin.PluginGuid, definition);
     }
 
     private static void StartStairsPlacement()
@@ -253,35 +269,6 @@ internal static class VerticalConstructionEntries
     private delegate bool PlacementValidator(
         Vector2Int physical,
         out string reason);
-}
-
-internal static class NativeConstructMenuContext
-{
-    [ThreadStatic]
-    internal static bool Active;
-}
-
-[HarmonyPatch(typeof(PlayerAbility_Construct), "OnUse")]
-internal static class NativeConstructAbilityPatch
-{
-    private static void Prefix() => NativeConstructMenuContext.Active = true;
-
-    private static Exception? Finalizer(Exception? __exception)
-    {
-        NativeConstructMenuContext.Active = false;
-        return __exception;
-    }
-}
-
-[HarmonyPatch(typeof(RadialMenuUI), nameof(RadialMenuUI.OpenAndDraw))]
-internal static class NativeConstructMenuPatch
-{
-    private static void Prefix(
-        ref List<ListUIItem_Generic> genericListUIItems)
-    {
-        if (NativeConstructMenuContext.Active)
-            VerticalConstructionEntries.AppendTo(genericListUIItems);
-    }
 }
 
 internal static class SaltFreeBuildCompatibility

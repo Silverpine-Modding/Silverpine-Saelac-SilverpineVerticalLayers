@@ -18,12 +18,12 @@ public enum LowerLayerViewMode
 [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
 [BepInDependency(
     Silverpine.ModdingTools.Plugin.PluginGuid,
-    BepInDependency.DependencyFlags.HardDependency)]
+    "1.11.0")]
 public sealed class Plugin : BaseUnityPlugin
 {
     public const string PluginGuid = "renegadex.silverpine.verticallayers";
     public const string PluginName = "Silverpine Vertical Layers";
-    public const string PluginVersion = "0.4.8";
+    public const string PluginVersion = "0.4.9";
 
     internal static ManualLogSource Log = null!;
     internal static Plugin Instance = null!;
@@ -82,6 +82,8 @@ public sealed class Plugin : BaseUnityPlugin
             StructureEditorFloor.Value, -1, MaxLevels.Value - 1);
 
         PrefabFactory.RegisterAll();
+        VerticalConstructionEntries.Register();
+        Log.LogInfo("Registered stairs and structural support in the shared Construct menu (Vertical Layers category).");
         RuntimeHost.Create();
         SerializationManager.OnFinishedLoadingSave -=
             RuntimeHost.EnsureAfterSaveLoad;

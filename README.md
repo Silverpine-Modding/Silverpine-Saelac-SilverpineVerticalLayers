@@ -7,20 +7,22 @@ connected, buildable upper floors to the base Silverpine world tile.
 
 - Silverpine 1.7.3
 - BepInEx 5
-- ModdingTools (`Saelac.Silverpine.ModdingTools`)
+- ModdingTools 1.11.0 or newer (`Saelac.Silverpine.ModdingTools`)
 
 Custom Item Loader is supported in the same installation but is not required.
 The stairs, projected floor, and structural support are registered as stable
 runtime prefabs because their paired-floor state requires custom serialization.
 
-Structure Handler 1.1.10 is detected optionally. When present, Vertical Layers
-adds floor-aware editor and transfer behavior without making it a hard dependency.
+Structure Handler 1.1.10 or its compatible editor API 2 (including 1.2.11) is
+detected optionally. When present, Vertical Layers adds floor-aware editor and
+transfer behavior without making it a hard dependency.
 
 ## Gameplay
 
-- Open the normal **Construct** radial. Vertical Layers adds **Floor Transition
-  Stairs** and **Structural Support** as the first two choices on that menu
-  instead of adding a separate player ability.
+- Open **Actions > Construct**, or press Modding Tools' **B** shortcut. The shared
+  construction window includes **Floor Transition Stairs** and **Structural
+  Support** under **Vertical Layers** and **All**, with searchable names. Their
+  order keeps them ahead of native entries in **All**.
 - Build **Floor Transition Stairs** on a tile tagged `Roofed`.
 - The destination floor is activated and every roofed tile below is projected
   as a walkable floor tile above it.
@@ -30,6 +32,13 @@ adds floor-aware editor and transfer behavior without making it a hard dependenc
 - Build a **Structural Support** beneath an existing upper floor to reset the
   four-tile distance and extend farther.
 - The default maximum is three total floors: ground, second, and third.
+
+Version 0.4.9 registers these entries through Modding Tools' construction API
+instead of patching the old radial menu. This removes the patch-order conflict
+with the framework's replacement menu. Custom placement callbacks still create
+the same paired stairs/supports and construction sites, with the same materials,
+setup/work turns, placement rules, and Salt Extra Debug Free Build behavior.
+No save-format or prefab-ID changes are required.
 
 Stairs are paired. Interacting with either end changes floors, and NPC
 pathfinding evaluates every connected stair route using local path length plus
@@ -137,7 +146,7 @@ IDs, recomputes stair destinations from the imported counterparts, activates
 the required floors, and regenerates roof projections. Structure Handler's
 world-tile controls also treat upper bands as Silverpine tile `(0, 0)`.
 
-The integration is version-checked against Structure Handler 1.1.10. If its
+The integration checks for Structure Handler 1.1.10 or editor API 2. If its
 private transfer methods change in a later release, only this optional adapter
 is disabled and Vertical Layers continues to operate normally.
 
@@ -227,6 +236,7 @@ With the .NET 9 SDK installed:
 
 ```powershell
 dotnet run --project Tests/PerformanceRegressionTests.csproj -c Release
+dotnet run --project Tests/Compatibility/CompatibilityChecks.csproj -c Release -- ../..
 ```
 
 The dependency-free test harness links the production floor-network, occupancy,
@@ -234,6 +244,13 @@ and coordinate code against a small in-memory world. It checks prefab-name
 classification, walkability, support distances/removal, cache invalidation,
 third-floor coordinates, tile-probe counts, and empty-air allocations. It does
 not simulate Unity rendering or object lifecycle callbacks.
+
+The compatibility harness compares the release DLL's framework references with
+the installed Modding Tools DLL and runs construction registration against a
+byte-identical copy of it in the test output. It checks category/entry ownership,
+repeat-registration safety, material and time metadata, preserved placement
+callbacks, the minimum framework version, and removal of the radial patches.
+It does not invoke Unity menu drawing or world placement.
 
 Before enabling a new build, check in-game: walk continuously on the 2nd and
 3rd floors, zoom while walking, watch NPCs enter/leave the lower viewport, switch
