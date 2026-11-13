@@ -107,6 +107,7 @@ internal static class Checks
         Check(setup.Body.Instructions.Any(i => i.Operand is MethodReference m &&
             m.DeclaringType.Name == "SaltFreeBuildCompatibility" && m.Name == "get_IsEnabled"),
             "construction callbacks still consult Salt Free Build");
+        EditorFloorViewChecks.Run(vertical, plugin, Check);
         Console.WriteLine($"{passed} compatibility checks passed. Live menu rendering and placement still require an in-game check.");
     }
 

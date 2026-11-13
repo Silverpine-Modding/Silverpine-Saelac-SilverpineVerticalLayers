@@ -287,6 +287,7 @@ internal static class StructureEditorFloorView
 
     private sealed class ViewState
     {
+        internal int SelectedFloor;
         internal object Editor = null!;
         internal object Structure = null!;
         internal FieldInfo ObjectsField = null!;
@@ -304,6 +305,39 @@ internal static class StructureEditorFloorView
     private static object? lastViewedStructure;
     private static int lastViewedRevision = -1;
     private static int lastViewedFloor = int.MinValue;
+    private static int documentScopeDepth;
+
+    // Save/history operations see the complete physical document. Nested calls
+    // must not reinstall a filtered view halfway through an outer operation.
+    internal sealed class DocumentScope : IDisposable
+    {
+        private readonly object editor;
+        private bool disposed;
+        internal DocumentScope(object editor)
+        {
+            this.editor = editor;
+            documentScopeDepth++;
+            EndSafely(editor, "document operation");
+        }
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            if (--documentScopeDepth == 0) BeginSafely(editor, "document operation complete");
+        }
+    }
+
+    internal static bool HasPendingHistory(object editor, bool force)
+    {
+        Type type = editor.GetType();
+        if (AccessTools.Field(type, "historyDirty")?.GetValue(editor) is not true ||
+            AccessTools.Field(type, "brushStroke")?.GetValue(editor) is true) return false;
+        return force || !(AccessTools.Field(type, "historyDeadline")?.GetValue(editor) is float deadline) ||
+            HistoryDeadlinePassed(deadline);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static bool HistoryDeadlinePassed(float deadline) => Time.realtimeSinceStartup >= deadline;
 
     internal static void BeginSafely(object editor, string caller)
     {
@@ -349,13 +383,21 @@ internal static class StructureEditorFloorView
 
     internal static void Begin(object editor)
     {
-        if (!StructureHandlerCompatibility.Available || active != null ||
+        if (!StructureHandlerCompatibility.Available || documentScopeDepth > 0 ||
             StructureHandlerCompatibility.EditorType == null)
             return;
         FieldInfo? structureField = AccessTools.Field(
             StructureHandlerCompatibility.EditorType, "structure");
         object? structure = structureField?.GetValue(editor);
-        if (structure == null)
+        int selected = Plugin.StructureEditorFloor.Value;
+        bool isOpen = AccessTools.Field(editor.GetType(), "open")?.GetValue(editor) is true;
+        if (active != null)
+        {
+            if (isOpen && ReferenceEquals(active.Editor, editor) &&
+                ReferenceEquals(active.Structure, structure) && active.SelectedFloor == selected) return;
+            End(active.Editor);
+        }
+        if (structure == null || !isOpen)
             return;
         FieldInfo? objectsField = AccessTools.Field(structure.GetType(), "objects");
         FieldInfo? terrainField = AccessTools.Field(
@@ -367,6 +409,7 @@ internal static class StructureEditorFloorView
         ViewState state = new()
         {
             Editor = editor,
+            SelectedFloor = selected,
             Structure = structure,
             ObjectsField = objectsField,
             TerrainField = terrainField,
@@ -375,13 +418,13 @@ internal static class StructureEditorFloorView
             ViewObjects = CreateCompatibleList(objects),
             ViewTerrain = CreateCompatibleList(terrain)
         };
-        int selected = Plugin.StructureEditorFloor.Value;
         try
         {
             PopulateView(objects, state.ViewObjects, state.ObjectStates, selected);
             PopulateView(terrain, state.ViewTerrain, state.TerrainStates, selected);
             objectsField.SetValue(structure, state.ViewObjects);
             terrainField.SetValue(structure, state.ViewTerrain);
+            SetEditorField(editor, "conflictRevision", -1);
             int revision = AccessTools.Field(editor.GetType(), "editRevision")?.GetValue(editor) is int value
                 ? value : -1;
             if (revision < 0 || !ReferenceEquals(lastViewedStructure, structure) ||
@@ -419,20 +462,24 @@ internal static class StructureEditorFloorView
         try
         {
             MergeView(
-                state.OriginalObjects, currentObjects, state.ObjectStates);
+                state.OriginalObjects, currentObjects, state.ObjectStates, state.SelectedFloor);
             MergeView(
-                state.OriginalTerrain, currentTerrain, state.TerrainStates);
+                state.OriginalTerrain, currentTerrain, state.TerrainStates, state.SelectedFloor);
         }
         finally
         {
             state.ObjectsField.SetValue(state.Structure, state.OriginalObjects);
             state.TerrainField.SetValue(state.Structure, state.OriginalTerrain);
+            // Save validates every physical floor, not the last cached filtered
+            // view (especially All, where floors intentionally overlap visually).
+            SetEditorField(editor, "conflictRevision", -1);
         }
     }
 
     internal static void DrawSelector(object editor)
     {
-        if (!StructureHandlerCompatibility.Available)
+        if (!StructureHandlerCompatibility.Available ||
+            AccessTools.Field(editor.GetType(), "open")?.GetValue(editor) is not true)
             return;
         using ModGuiScope scope = ModGui.BeginScaled(1920f, 1080f);
         GUI.depth = -2000;
@@ -465,6 +512,8 @@ internal static class StructureEditorFloorView
             selected, label, GUI.skin.button, GUILayout.Width(112f));
         if (!next || selected)
             return;
+        // Finish edits on the old floor before changing how new records are assigned.
+        EndSafely(editor, "floor selection");
         Plugin.StructureEditorFloor.Value = value;
         SetEditorField(editor, "selectedObject", -1);
         SetEditorField(editor, "selectedTerrain", -1);
@@ -525,7 +574,8 @@ internal static class StructureEditorFloorView
     private static void MergeView(
         IList original,
         IList view,
-        IDictionary<object, RecordState> states)
+        IDictionary<object, RecordState> states,
+        int selectedFloor)
     {
         var visible = new HashSet<object>(view.Cast<object>());
         var deleted = new HashSet<object>(states.Keys.Where(record => !visible.Contains(record)));
@@ -537,8 +587,8 @@ internal static class StructureEditorFloorView
         {
             int level = states.TryGetValue(record, out RecordState state)
                 ? state.Level
-                : Plugin.StructureEditorFloor.Value >= 0
-                    ? Plugin.StructureEditorFloor.Value
+                : selectedFloor >= 0
+                    ? selectedFloor
                     : 0;
             SetRecordX(record, ToPhysicalX(GetRecordX(record), level));
             if (existing.Add(record))
@@ -619,7 +669,6 @@ internal static class StructureEditorOnGuiPatch
 
     private static void Postfix(object __instance)
     {
-        StructureEditorFloorView.EndSafely(__instance, "OnGUI postfix");
         StructureEditorFloorView.DrawSelector(__instance);
     }
 
@@ -627,7 +676,7 @@ internal static class StructureEditorOnGuiPatch
         object __instance,
         Exception? __exception)
     {
-        StructureEditorFloorView.EndSafely(__instance, "OnGUI finalizer");
+        if (__exception != null) StructureEditorFloorView.EndSafely(__instance, "OnGUI exception");
         return __exception;
     }
 }
@@ -648,29 +697,54 @@ internal static class StructureEditorMutationPatch
                      "CreateBlankStructure",
                      "CombineCheckedFiles",
                      "Close",
+                     "OnFrameworkSessionClosed",
+                     "ResetHistory",
                      "CaptureEditorSnapshot",
                      "Undo",
                      "Redo",
                      "RestoreEditorSnapshot"
                  })
         {
-            MethodInfo? method = AccessTools.Method(type, name);
+            // CaptureEditorSnapshot belongs to old versions; avoid Harmony's
+            // missing-method warning on the new in-memory history implementation.
+            MethodInfo? method = type?.GetMethod(name,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (method != null)
                 yield return method;
         }
     }
 
-    private static void Prefix(object __instance, MethodBase __originalMethod) =>
-        StructureEditorFloorView.EndSafely(
-            __instance, __originalMethod.Name + " prefix");
+    private static void Prefix(object __instance, out StructureEditorFloorView.DocumentScope __state) =>
+        __state = new StructureEditorFloorView.DocumentScope(__instance);
 
-    private static void Postfix(object __instance, MethodBase __originalMethod) =>
-        StructureEditorFloorView.BeginSafely(
-            __instance, __originalMethod.Name + " postfix");
+    private static void Postfix(StructureEditorFloorView.DocumentScope? __state) => __state?.Dispose();
 
     private static Exception? Finalizer(
-        Exception? __exception)
+        Exception? __exception, StructureEditorFloorView.DocumentScope? __state)
     {
+        __state?.Dispose();
+        return __exception;
+    }
+}
+
+[HarmonyPatch]
+internal static class StructureEditorHistoryPatch
+{
+    private static MethodInfo? Find() => StructureHandlerCompatibility.EditorType?.GetMethod(
+        "FlushHistory", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static bool Prepare() => StructureHandlerCompatibility.Available && Find() != null;
+    private static MethodBase TargetMethod() => Find()!;
+    private static void Prefix(object __instance, bool force, out StructureEditorFloorView.DocumentScope? __state)
+    {
+        // FlushHistory is called even on idle repaints. No pending edit means no
+        // full-document merge, allocations, or coordinate transformations.
+        __state = StructureEditorFloorView.HasPendingHistory(__instance, force)
+            ? new StructureEditorFloorView.DocumentScope(__instance) : null;
+    }
+    private static void Postfix(StructureEditorFloorView.DocumentScope? __state) => __state?.Dispose();
+    private static Exception? Finalizer(Exception? __exception, StructureEditorFloorView.DocumentScope? __state)
+    {
+        __state?.Dispose();
         return __exception;
     }
 }

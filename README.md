@@ -3,6 +3,17 @@
 `SilverpineVerticalLayers` is a BepInEx plugin for Silverpine 1.7.3 that adds
 connected, buildable upper floors to the base Silverpine world tile.
 
+## Editor performance (0.4.10)
+
+- Keep the Structure Handler floor view alive across GUI events instead of
+  allocating, filtering, transforming and merging the document every repaint.
+- Merge back to physical coordinates for save, undo, redo, history initialization
+  and close. Nested operations retain the full document, including hidden floors.
+- Ignore idle history flushes and preserve the previous floor when committing
+  new records during a floor switch. Support the current in-memory history API
+  without missing `CaptureEditorSnapshot` warnings on recent Structure Handler.
+- No ModdingTools API, gameplay, prefab identifier or save-format changes.
+
 ## Requirements
 
 - Silverpine 1.7.3
